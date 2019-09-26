@@ -1,0 +1,767 @@
+#include <GL/gl.h>
+#include <GL/glu.h>
+#include <GL/glut.h>
+#include "GL/osmesa.h"
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <cmath> 			 // pow,sqrt,log10
+
+#include "mesaChars.cc" 
+#include "mesaSpectrogram.cc"
+#include "mesaFlight.cc"
+#include "mesaMesh.cc"
+#include "mesaTunnel.cc"
+#include "mesaHistogram.cc"
+
+#define YES 1
+#define NO 0
+#define TOPSIGN 0
+#define BOTTOMSIGN 1
+#define MAXHEIGHT 200	
+#define MAXSTAR 5
+#define CALC 0
+
+extern void mesaToolsDisplayCB(int value);
+extern void GLAPIENTRY recordFlightPathCB(GLfloat *vertex);
+
+/////////////////////////////
+//
+// mesaTools Class def
+//
+////////////////////////////
+class mesaTools
+	{
+	public:
+		mesaTools(midiClient &_midiPointer);
+		~mesaTools();
+		
+		void display(int dB);
+ 		
+		mesaNURBS CAMERA;
+		mesaFlight FLIGHT;
+		mesaSpectrogram SPECTROGRAM;
+		mesaTunnel TUNNEL;
+		mesaMesh MESH;
+		mesaHistogram HISTOGRAM;
+		midiClient *midiPointer;
+		
+ 		sign topLedsign;
+	
+		float cameraX,cameraY,cameraZ;
+		float centreX,centreY,centreZ;
+
+		int inited;
+		int showAxis;
+		int showPath;
+
+   	int returnVar;
+   	int topPang;
+   	int lighting;
+		int busy;
+
+		int showCurve;
+		int followCurve;
+   	
+   	GLuint fogFilter;					// Which Fog To Use
+   	GLfloat fogDensity;
+   	GLfloat fogColour;
+
+		int thresholdRange;
+		
+		int clearColour;
+		int blending;
+		int sourceBlend;
+		int destinationBlend;
+		int depthTesting;
+		int depthTestType;
+		int depthTest[8];
+		OSMesaContext ctx;
+		int spectrogramType;		
+	
+	private:
+		typedef struct starstruct {
+	    float x;
+	    float y;
+	    float z;
+	    float speed;
+	    float angle;
+	    int dB;
+		} starStruct;
+
+
+
+		starStruct star[MAXSTAR];
+		
+		// private functions		
+		void drawAxis(float x,float y,float z);
+		void starMove(int dB);
+		void starMake(starstruct *star);
+		void starDisplay(starstruct *star);
+		double fclamp (double x, double min, double max);
+		void signOut(uint sign);
+		void drawLetter(charPointer *l);		
+		void printStrokedString(char *s);		
+		void init();
+
+
+//		uint *peak;
+//		uint *peakThreshold;
+		
+//		uint sg[SIGN_WIDTH][MAXHEIGHT];
+		void *signOutBuffer;
+		void *contextBuffer; 	
+		GLuint fogMode[];
+	};
+	
+//////////////////////////////////////////
+//
+// constructor
+//
+///////////////////////////////////////
+/*
+peaks::peaks(sign &_ledsign,midiClient &_midiPointer) : peaksledsign(&_ledsign) ,
+															 freqCursor(_ledsign) ,
+															 DBMETER(_ledsign) ,
+															 BIGPEAKS(_ledsign) ,
+															 midiPointer(&_midiPointer)
+*/
+mesaTools::mesaTools(midiClient &_midiPointer) : 
+												 topLedsign((char*)"192.168.164.12") ,
+												 midiPointer(&_midiPointer),
+												 HISTOGRAM(topLedsign,_midiPointer),		
+												 SPECTROGRAM(topLedsign),
+												 CAMERA((_GLUfuncptr) &recordFlightPathCB),
+												 TUNNEL(),
+												 MESH()
+												 
+											//	 TUNNEL(topLedsign)
+											//	 MESH(topLedsign)
+	{
+	int i;
+	inited = 0;
+ 	busy 	 = 0;	 
+	signOutBuffer = malloc(128 * 48 * 1 * sizeof(GLubyte));
+
+
+	if (!signOutBuffer) 
+		{
+	   printf("Error: couldn't allocate image buffer\n");
+	   return;
+	  }
+
+//  fogMode[0] =  GL_EXP;
+//  fogMode[1] =	GL_EXP2;
+//  fogMode[2] = GL_LINEAR;	// Storage For Three Types Of Fog		
+	
+//	glFogi(GL_FOG_MODE, fogMode[fogFilter]);		// Fog Mode
+ 	
+	}
+	
+//////////////////////////////////////////
+//
+// deconstructor
+//
+///////////////////////////////////////
+mesaTools::~mesaTools()
+	{
+		
+	}
+
+//////////////////////////////////////
+//
+// double effect::fclamp (double x, double min, double max)
+//
+////////////////////////////////////////
+double mesaTools::fclamp (double x, double min, double max)
+	{
+  if (x < min) return min;
+  
+  if (x > max) return max;
+  
+  return x;
+	}
+
+///////////////////////////////////////
+//
+// mesa off screen init
+//
+///////////////////////////////////////
+void mesaTools::init()
+	{
+	int x,z;
+
+ 	CAMERA.calcControlPoints(1.0, 1.0, 1.0); // reset control points
+  CAMERA.calcCurve();
+
+ 	/*
+ 	for(z=0;z<MAXHEIGHT;z++)	
+		for (x=0;x<SIGN_WIDTH;x++)
+			sg[x][z] = 0;	
+	*/
+	starMake(star);	// last arg is distance
+		
+	GLuint base;
+	int i;
+	int distance;
+	
+	depthTest[0] = GL_NEVER;
+	depthTest[1] = GL_LESS;
+	depthTest[2] = GL_EQUAL;
+	depthTest[3] = GL_LEQUAL;
+	depthTest[4] = GL_GREATER;
+	depthTest[5] = GL_NOTEQUAL;
+	depthTest[6] = GL_GEQUAL;
+	depthTest[7] = GL_ALWAYS;
+
+	// Create an RGBA-mode context 
+	#if OSMESA_MAJOR_VERSION * 100 + OSMESA_MINOR_VERSION >= 305
+  	// specify Z, stencil, accum sizes 
+  	ctx = OSMesaCreateContextExt( OSMESA_RGBA, 16, 0, 0, NULL );
+			#else
+   			ctx = OSMesaCreateContext( OSMESA_RGBA, NULL );
+	#endif
+	
+  if (!ctx) 
+  	{
+     printf("OSMesaCreateContext failed!\n");
+     exit(0);
+   	}
+
+   // Allocate the image/buffer 
+   contextBuffer = malloc( 128 * 48 * 3 * 4 * sizeof(GLubyte) );
+   
+  if (!contextBuffer) 
+   	{
+     printf("Alloc image contextBuffer failed!\n");
+     exit(0);
+  	}
+
+   // Bind the contextBuffer to the context and make it current 
+  if (!OSMesaMakeCurrent( ctx, contextBuffer, GL_UNSIGNED_BYTE, 128, 48 * 3 )) 
+  	{
+     printf("OSMesaMakeCurrent failed!\n");
+     exit(0);
+   	}
+
+//glEnable(GL_DITHER);
+// glDisable(GL_STENCIL);
+  glHint(GL_PERSPECTIVE_CORRECTION_HINT, GL_NICEST);  // Really Nice Perspective Calculations
+	glShadeModel (GL_FLAT);
+ 	glClearDepth(1.0f);			// Depth Buffer Setup
+ 	glEnable(GL_DEPTH_TEST);//  Enable Z-buffer depth test
+ 	glEnable(GL_CULL_FACE); 
+ 
+	//glEnable(GL_ALPHA_TEST);
+	
+	//glShadeModel(GL_SMOOTH);			
+
+	base = glGenLists (128);
+	glListBase(base);
+//  glColor3f (1.0, 0.0, 0.0);  
+  glNewList(base+'0', GL_COMPILE); drawLetter(char0); glEndList();
+  glNewList(base+'1', GL_COMPILE); drawLetter(char1); glEndList();
+  glNewList(base+'2', GL_COMPILE); drawLetter(char2); glEndList();
+  glNewList(base+'3', GL_COMPILE); drawLetter(char3); glEndList();
+  glNewList(base+'4', GL_COMPILE); drawLetter(char4); glEndList();
+  glNewList(base+'5', GL_COMPILE); drawLetter(char5); glEndList();
+  glNewList(base+'6', GL_COMPILE); drawLetter(char6); glEndList();
+  glNewList(base+'7', GL_COMPILE); drawLetter(char7); glEndList();
+  glNewList(base+'8', GL_COMPILE); drawLetter(char8); glEndList();
+  glNewList(base+'9', GL_COMPILE); drawLetter(char9); glEndList();
+  
+  glNewList(base+'A', GL_COMPILE); drawLetter(charA); glEndList();
+  glNewList(base+'B', GL_COMPILE); drawLetter(charB); glEndList();
+  glNewList(base+'C', GL_COMPILE); drawLetter(charC); glEndList();
+  glNewList(base+'D', GL_COMPILE); drawLetter(charD); glEndList();
+  glNewList(base+'E', GL_COMPILE); drawLetter(charE); glEndList();
+  glNewList(base+'F', GL_COMPILE); drawLetter(charF); glEndList();
+  glNewList(base+'G', GL_COMPILE); drawLetter(charG); glEndList();
+  glNewList(base+'H', GL_COMPILE); drawLetter(charH); glEndList();
+  glNewList(base+'I', GL_COMPILE); drawLetter(charI); glEndList();
+  glNewList(base+'K', GL_COMPILE); drawLetter(charK); glEndList();
+  glNewList(base+'N', GL_COMPILE); drawLetter(charN); glEndList();
+  glNewList(base+'P', GL_COMPILE); drawLetter(charP); glEndList();
+  glNewList(base+'S', GL_COMPILE); drawLetter(charS); glEndList();
+  glNewList(base+'T', GL_COMPILE); drawLetter(charT); glEndList();
+  glNewList(base+'V', GL_COMPILE); drawLetter(charV); glEndList();
+  glNewList(base+'X', GL_COMPILE); drawLetter(charX); glEndList();
+  glNewList(base+'Y', GL_COMPILE); drawLetter(charY); glEndList();
+  glNewList(base+'b', GL_COMPILE); drawLetter(charb); glEndList();
+  glNewList(base+'z', GL_COMPILE); drawLetter(charz); glEndList();
+  glNewList(base+'Z', GL_COMPILE); drawLetter(charZ); glEndList();
+  glNewList(base+'*', GL_COMPILE); drawLetter(charAsterisk); glEndList();
+  glNewList(base+'-', GL_COMPILE); drawLetter(charNeg); glEndList();
+  glNewList(base+'+', GL_COMPILE); drawLetter(charPos); glEndList();
+  glNewList(base+'.', GL_COMPILE); drawLetter(charDot); glEndList();
+  glNewList(base+' ', GL_COMPILE); glTranslatef(1.0, 0.0, 0.0); glEndList();
+ 
+  // camera icon
+  glNewList(base+'@', GL_COMPILE); drawLetter(charCamera); glEndList();
+
+	//NURBSInit(); 
+
+  inited = 1;
+   
+ 	}
+
+/////////////////////////
+//
+//	void mesaTools::starMake(starstruct *star) 
+//
+////////////////////////////
+void mesaTools::starMake(starstruct *star) 
+{
+	int i;
+	
+  for(i=0; i<MAXSTAR; i++) 
+  {
+  star[i].x = (float)(rand() % 5);
+  star[i].y = (float)(rand() % 5);
+  star[i].z = -100;
+  star[i].speed = (float)(rand() % 5) + 1;
+  star[i].angle = (float)(rand() % 5);
+  }
+}
+
+///////////////////////////////
+//
+//		void mesaTools::starMove()
+//
+/////////////////////////////////
+void mesaTools::starMove(int dB)
+	{
+	int i;
+			
+  for(i=0; i < MAXSTAR; i++) 
+  	{
+		star[i].z =star[i].z + star[i].speed;
+
+		if (star[i].z > 20.0)
+			{
+		  star[i].x = (float)(rand() % 5);
+		  star[i].y = (float)(rand() % 5);
+		  star[i].z = -100;
+		  star[i].speed = (float)(rand() % 5) + 1;
+		  star[i].angle = (float)(rand() % 5);
+    	star[i].dB = dB;
+			}
+		}
+	}
+
+/////////////////////////////////
+//
+//		void mesaTools::starDisplay(starstruct *star, int maxstar, float size) 
+//
+////////////////////////////////////
+void mesaTools::starDisplay(starstruct *star) 
+	{
+	int i;
+	int sign;
+	
+	char text[10];
+
+	 glPushMatrix();	
+	 
+	for(i=0; i<MAXSTAR; i++) 
+		{
+ 	  snprintf ( text, 9, "%dDB", star[i].dB ); 
+	 
+	  if (FLIGHT.flying == 1)
+	  	{   
+/*
+		glTranslatef(flightCentreX[flight][flightIndex] + flightX[flight][flightIndex + (sign*180)] ,
+			 					 flightCentreY[flight][flightIndex], 
+			 					 flightCentreZ[flight][flightIndex] + flightZ[flight][flightIndex + (sign*180)]);		
+*/
+//	glRotatef(45.0,0.0, 1.0, 0.0);			
+//		 	glTranslatef(star[i].x,
+//		 							 star[i].y,
+//		 							 star[i].z );   
+
+//			glScalef(fontScaleX,fontScaleY,fontScaleZ);  
+			
+// 			glScalef(10,,fontScaleZ);  
+	  	} else {
+	   	 	  //  	glRotatef(-60.0, 0.0, 1.0, 0.0); 	
+	   					glRotatef(star[i].angle ,1.0 ,0.0 ,0.0);			   		
+//	   					glTranslatef(star[i].x, star[i].y, star[i].z );   
+	//   					glScalef(fontScaleX,fontScaleY,fontScaleZ);  
+	   	 	    }
+	   	
+		glTranslatef(star[i].x, star[i].y, star[i].z );	
+   	printStrokedString(text);   
+    }
+    glPopMatrix();    
+	}
+
+//////////////////////////////
+//
+// display
+//
+/////////////////////////
+void mesaTools::display(int dB)
+	{
+	GLfloat m[16];
+
+ int i;
+	
+	if (inited == 0)
+		init();
+
+	busy = 1;
+	
+	if (lighting == 1)
+		{
+		glEnable(GL_LIGHTING);
+		} else {
+					glDisable(GL_LIGHTING);
+					}
+					
+	if (blending == 1)
+		glEnable(GL_BLEND);
+			else
+				glDisable(GL_BLEND);
+
+//	glClearAccum( 0,0,0,1 ) ;
+	glClearColor(0.0f, 0.0f, 0.0f,clearColour); // opaque Black Background
+ 
+	glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+	
+	if (depthTesting == 1)
+		{
+
+  	glDepthFunc(depthTest[depthTestType]); // The Type Of Depth Testing To Do
+  	}
+
+//	glDrawBuffer(GL_FRONT_AND_BACK);
+	
+	GLfloat LightAmbient[]= { 0.0005f, 0.0f, 0.0f, 1.0f };
+	GLfloat LightDiffuse[]= { 0.0f, 0.0f, 0.0f, 0.0f };	
+	GLfloat LightPosition[]= { 0.0f, 10.0f, 0.0f, 1.0f };	
+	
+	glLightfv(GL_LIGHT1, GL_AMBIENT, LightAmbient);				// Setup The Ambient Light
+	glLightfv(GL_LIGHT1, GL_DIFFUSE, LightDiffuse);				// Setup The Diffuse Light
+	glLightfv(GL_LIGHT1, GL_POSITION,LightPosition);			// Position The Light
+	
+	glEnable(GL_LIGHT1);
+	
+//	glHint(GL_FOG_HINT, GL_DONT_CARE);			// Fog Hint Value
+//	glFogf(GL_FOG_START, 0.0f);				// Fog Start Depth
+//	glFogf(GL_FOG_END, 50.0f);				// Fog End Depth
+//	glEnable(GL_FOG);					// Enables GL_FOG
+	
+//	GLfloat fogColor[4]= {fogColour, 0.0f, 0.0f, 1.0f};		// Fog Color
+//	glFogfv(GL_FOG_COLOR, fogColor);			// Set Fog Color
+//	glFogf(GL_FOG_DENSITY, fogDensity);				// How Dense Will The Fog Be
+//	glFogi(GL_FOG_MODE, fogMode[fogFilter]);
+  
+  glViewport(0, 0, 128, 48);
+
+//	if (CAMERA.getX() > CAMERA.xEyeCentre)
+//		glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_DST_ALPHA);//
+//			else
+//		 		glBlendFunc(GL_DST_ALPHA,GL_ONE_MINUS_SRC_ALPHA);//
+ 
+
+  
+  glMatrixMode(GL_PROJECTION);
+ 
+ 	 glLoadIdentity();
+
+  	gluPerspective(topPang,2.6,0.0,200.0);
+ 	
+ /*
+    glOrtho(0.0,128.0, 			// left / right
+    				0.0,48.0,				// bottom / top
+    				1.0,100.0);  // near / far
+*/
+
+
+//	if ((FLIGHT.flying == 0))
+
+	if ((FLIGHT.flying == 0) )
+		 gluLookAt(cameraX, cameraY, cameraZ,  
+	 					centreX, centreY, centreZ, 
+	 					0, 1, 0); // positive Y up vector 
+ 
+	if (FLIGHT.flying == 1) 
+		{
+//		if (followCurve == 1)
+			FLIGHT.setupCamera(&CAMERA,followCurve);
+
+//		 								CAMERA.incIndex();		
+	/*
+		if ((followCurve == 0) )						 		 
+		 		 {
+		 		 gluLookAt(FLIGHT.getX(),
+	 		 					 FLIGHT.getY(),
+	 		 					 FLIGHT.getZ(),  // camera location
+		 		 					 
+	 							 FLIGHT.flightCentreX , 
+	 							 0.0 , 
+	 							 FLIGHT.flightCentreZ , // eye centre
+	 							 0, 1, 0); // positive Y up vector 
+	 	
+	 				FLIGHT.incIndex();					
+	 				} 
+	*/ 	
+	 	} //if (FLIGHT.flying == 1) 
+
+ 	if ((spectrogramType == 0))	 // tunnel					 		 
+		TUNNEL.setupCamera();
+
+ 	if ((spectrogramType == 3))	 // histogram
+		{
+//		
+	//	HISTOGRAM.setupCamera();
+		}
+
+
+	CAMERA.incIndex();		
+	
+	mesaToolsDisplayCB(CAMERA.index);
+//updateTunnelVertices(TUNNEL.TUNNELNURBS.index);
+	
+ 	glMatrixMode(GL_MODELVIEW);
+ 	glLoadIdentity();
+
+	switch (spectrogramType)
+		{
+		case 0:
+			TUNNEL.draw();
+		break;
+
+		case 1:
+			if (FLIGHT.flying == 0)
+				SPECTROGRAM.drawSpectrogram(cameraX ,
+																					centreX - (0.3 * cameraX),
+																					cameraY ,
+																					cameraY ,
+																					cameraZ ,
+																					centreZ ,
+																					sourceBlend,
+																					destinationBlend);//CAMERA.offsetY);
+					
+			if ((FLIGHT.flying == 1) && (followCurve == 1))
+					SPECTROGRAM.drawSpectrogram(CAMERA.getX() ,
+																					CAMERA.xEyeCentre - (0.3 * CAMERA.getX()),
+																					CAMERA.getY() ,
+																					CAMERA.offsetY,
+																					CAMERA.getZ(),
+																					CAMERA.zEyeCentre - (0.8 * CAMERA.getY()),
+																					sourceBlend,
+																					destinationBlend);
+			  
+			if ((FLIGHT.flying == 1) && (followCurve == 0))
+				SPECTROGRAM.drawSpectrogram(FLIGHT.getX() ,
+																				FLIGHT.flightCentreX,
+																				FLIGHT.getY() ,
+																				0.0,
+																				CAMERA.getZ(),
+																				CAMERA.zEyeCentre - (0.8 * CAMERA.getY()),
+																				sourceBlend,
+																				destinationBlend);
+		
+		break;
+		
+		case 2:
+			MESH.drawMesh(&TUNNEL.NURBS,32,0);
+		break;	
+
+		case 3:
+	//		glLoadIdentity();
+	 		HISTOGRAM.display();
+		break;
+		}
+  		
+	if (showPath == 1)
+		FLIGHT.showFlightPath();
+	
+	// show control points/NURBS?
+	if ((showCurve == 1 ) && (CAMERA.controlPoints != 0))
+		CAMERA.showCurve();
+
+ 	if (showAxis == 1)
+		drawAxis(SIGN_WIDTH,SIGN_HEIGHT,SPECTROGRAM.depth);
+ 
+   //starMove(dB);
+	//starDisplay(star); 
+
+  glFlush();
+	signOut(TOPSIGN);
+	busy = 0;
+//	OSMesaDestroyContext( ctx );
+//	inited =0;
+	}
+
+///////////////////////////////////////////////////
+//
+//	void signout()
+//
+////////////////////////////////////////////////// 
+void mesaTools::signOut(uint sign)
+	{
+	int i, x, y;
+	
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+	
+	topLedsign.clear(0);
+	
+	glReadPixels(0, 0, 128, 48, GL_RED, GL_UNSIGNED_BYTE, signOutBuffer);
+	
+		
+	for (y=0; y<48; y++) 
+	  for (x=0; x<128;x+=4) 
+	    {
+	   	for (i=0;i<4;i++)
+	  		{
+	    	if (sign == TOPSIGN)		
+	    		topLedsign.setxy(x+i,47-y,((GLubyte*)signOutBuffer)[y*128+x+i] & 3 ) ;	
+	      }
+	   	}
+
+	if (sign == TOPSIGN)		
+		topLedsign.refresh();				
+			
+//	free(buffer);		
+}
+
+	
+//////////////////////////////////////////////////////////////
+// 
+//  drawLetter() interprets the instructions from the array
+//  for that letter and renders the letter with line segments.
+//
+//////////////////////////////////////////////////////////
+void mesaTools::drawLetter(charPointer *l)
+	{
+   glBegin(GL_LINE_STRIP);
+   
+   while (1) 
+   	{
+      switch (l->type) 
+      	{
+         case PT:
+            glVertex2fv(&l->x);
+            break;
+         case STROKE:
+            glVertex2fv(&l->x);
+            glEnd();
+            glBegin(GL_LINE_STRIP);
+            break;
+         case END:
+            glVertex2fv(&l->x);
+            glEnd();
+            glTranslatef(2.0, 0.0, 0.0);
+            return;
+      	}
+      l++;
+   	}
+	}
+
+///////////////////////////////////////
+//
+// void mesaTools::printStrokedString(char *s,float x,float y,float z)
+//
+///////////////////////////////////////
+void mesaTools::printStrokedString(char *s)
+	{
+  GLsizei len = strlen(s);
+    
+  glCallLists(len, GL_BYTE, (GLbyte *)s);
+	}
+ 
+//////////////////////////////////
+//
+//			mesaTools::drawAxis(x,y,z)	 	
+//
+//////////////////////////////////
+void mesaTools::drawAxis(float x,float y,float z)	 	
+	{
+	int i,j,k;
+	 
+	glPushMatrix();  
+  
+	// x axis		
+//	glEnable(GL_LINE_STIPPLE);	
+//	glLineStipple(1, 0xAAAA);
+/*	
+	glBegin(GL_LINES);	
+	glColor3f(0.005, 0.0, 0.0);
+	glVertex3f(-x, 0.0, 0.0);
+	glVertex3f(x, 0.0, 0.0);
+	glEnd();
+	*/
+	glPointSize(1.0);
+	glBegin(GL_POINTS);
+	glColor4f(0.005, 0.0, 0.0,0.0);
+		
+	for (i = -x ; i < x;i++)
+		glVertex3f(i, 0.0, 0.0);
+	
+	glEnd();
+//	glDisable(GL_LINE_STIPPLE);							
+	
+	// y axis	 	
+//	glEnable(GL_LINE_STIPPLE);							
+//	glLineStipple(1, 0xFF00);
+	glBegin(GL_LINES);	
+	glColor4f(1.0,  0.0, 0.0 ,0.0);
+	glVertex3f(0.0,  -y, 0.0 );
+	glVertex3f(0.0,  y, 0.0 );
+	glEnd();			
+//	glDisable(GL_LINE_STIPPLE);							
+	
+	// z axis
+//	glEnable(GL_LINE_STIPPLE);							
+//	glLineStipple(1, 0x6666);
+	//glColor4f(1.0,  0.0, 0.0 ,1.0);
+	glBegin(GL_POINTS);
+	glColor4f(1.0,  0.0, 0.0 ,0.0);
+	
+	for (i = -z ; i < z;i++)
+		glVertex3f(0.0,  0.0, i );
+	//glVertex3f(0.0,  0.0, z );
+	glEnd();
+//	glDisable(GL_LINE_STIPPLE);							
+
+	// bright dots @ end of axis
+	glPointSize(2.0);
+	
+	glBegin(GL_POINTS);
+	glColor4f(1.0,  0.0, 0.0 ,0.0);
+	glVertex3f(SIGN_WIDTH - 1,  0.0, 0.0 );
+	glVertex3f(-SIGN_WIDTH - 1,  0.0, 0.0 );
+
+	glVertex3f(0.0, SIGN_HEIGHT - 1, 0.0 );
+	glVertex3f(0.0, -SIGN_HEIGHT - 1, 0.0 );
+
+	glVertex3f(0.0, 0.0, z );
+	glVertex3f(0.0, 0.0,-z );
+	
+	// eye centre
+	glVertex3f(CAMERA.xEyeCentre - (0.3 * CAMERA.getX()),0.0,0.0);
+	glEnd();
+
+/*
+glPointSize(1.0);
+	glBegin(GL_POINTS);
+	glColor3f(0.005,  0.0, 0.0 );
+
+	for (i = 0;i < SIGN_WIDTH;i++)
+	 for (k = 0;k < 5;k++)
+		for (j = 0;j < SPECTROGRAM.depth;j++)
+			glVertex3f(i, k,-j);
+	
+	glEnd();
+	*/
+	glRotatef(90,0.0,1.0,0.0);
+	glScalef(5.0,10.0,5.0);   
+	glTranslatef(0.0,0.2,-0.2);
+	printStrokedString((char*)" NEGATIVE Z AXIS");   
+	glScalef(1.0,1.0,1.0); 
+
+	glPopMatrix(); 
+	}
+

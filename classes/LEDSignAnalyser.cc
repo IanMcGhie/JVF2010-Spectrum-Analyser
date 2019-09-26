@@ -1,0 +1,479 @@
+#include <jack/jack.h> // jack_default_audio_sample
+#include <cmath> 			 // pow,sqrt,log10
+#include "sign.cc"
+#include "peaks.cc"
+#include "oscilloscope.cc"
+#include <fftw3.h>
+#include <float.h>
+#include "mesa/mesaTools.cc"
+
+/////////////////
+//
+//	inline sqr function
+//
+////////////////////
+inline double sqr (double arg)
+	{
+  return arg * arg;
+	}
+
+////////////////////////////////////
+//
+// analyser object
+//
+////////////////////////////////////
+class effect 
+{
+	
+public:
+	effect(); 			// constructor
+	~effect();			// deconstructor
+  	void signOut();	 
+ 	void tick(jack_default_audio_sample_t _inL[BUFFERFRAMES],
+						jack_default_audio_sample_t _inR[BUFFERFRAMES],
+						jack_default_audio_sample_t _outL[BUFFERFRAMES],
+						jack_default_audio_sample_t _outR[BUFFERFRAMES]);
+
+
+	sign ANALYSERLEDSIGN;
+	mesaTools MESA; 
+	peaks PEAKS;
+	midiClient MIDICLIENT;
+	oscilloscope SCOPE;
+	float gain;
+//	effect& operator=(const effect&); // whoa
+	
+	float mix;
+	int bypass;
+	int displayType;
+	float dB;
+	int xScale;
+	
+	private:
+		double window[BUFFERFRAMES];
+		double spectrum[SIGN_WIDTH];
+		double fclamp (double x, double min, double max);
+		double clamp (double x, double min, double max);
+		uint db2sy (double db);
+
+	 	double *in;
+	 	fftw_complex *out;
+	  fftw_plan thePlan;
+		int refresh,REFRESH;
+		int PEAKY;
+};// end o class definition
+
+//////////////////////////////////////
+//
+// analyser constructor
+//
+/////////////////////////////////////
+effect::effect()  : ANALYSERLEDSIGN((char*)"192.168.50.52"),
+									  MIDICLIENT((char*)"192.168.50.12"),
+									  MESA(MIDICLIENT) ,
+									  PEAKS(ANALYSERLEDSIGN,MIDICLIENT),
+									  SCOPE(ANALYSERLEDSIGN)
+									  
+									   
+									 
+	{
+ 	int i;
+	dB = 0.0; 	
+ 	
+  
+ 	
+	refresh 			= 0;
+	REFRESH 			= 0;
+	mix 	 				= 1.0;
+	bypass 				= 0;
+	ANALYSERLEDSIGN.weightingView = 0;
+	   
+	// create window function array....once
+	// so we dont have to calculate this everytime in analyse();
+ 	for (i = 0; i < BUFFERFRAMES ; i++)
+ 		window[i] = (0.5 * (1.0-cos((2*3.14159*i)/((BUFFERFRAMES) - 1))));
+
+	// allocate memory for fftw arrays	
+	in  = (double*) fftw_malloc(sizeof(double) * BUFFERFRAMES);
+  out = (fftw_complex *) fftw_malloc(sizeof(fftw_complex) * (BUFFERFRAMES/2) + 1);
+
+	//http://www.fftw.org
+	//One-Dimensional DFTs of Real Data
+	//
+	//First of all, the input and output arrays are of different
+	//sizes and types: the input is n real numbers, while the output 
+	//is n/2+1 complex numbers 
+  
+  //thePlan = fftw_plan_r2r_1d(BUFFERFRAMES, in , out , FFTW_R2HC, FFTW_ESTIMATE); 	 
+  thePlan = fftw_plan_dft_r2c_1d(BUFFERFRAMES, in , out ,  FFTW_ESTIMATE); 	 
+  
+  displayType = 1;
+  PEAKY = 47; // largest y value peak can have
+	}
+
+//////////////////////////////////////
+//
+// analyser destructor
+//
+/////////////////////////////////////
+effect::~effect()
+	{
+	// boom		
+	}
+
+//////////////////////////////////////
+//
+// double effect::fclamp (double x, double min, double max)
+//
+////////////////////////////////////////
+double effect::fclamp (double x, double min, double max)
+	{
+  if (x < min) 
+  	return min;
+  
+  if (x > max) 
+  	return max;
+  
+  return x;
+	}
+
+//////////////////////////////////////
+//
+// double effect::clamp (double x, double min, double max)
+//
+////////////////////////////////////////
+double effect::clamp (double x, double min, double max)
+	{
+  if (x < min) 
+  	return min;
+  
+  if (x > max) 
+  	return max;
+  
+  return x;
+	}
+
+//////////////////////////////////////
+//
+// analyser analyse
+//
+/////////////////////////////////////
+void effect::tick(jack_default_audio_sample_t _inL[BUFFERFRAMES],
+									jack_default_audio_sample_t _inR[BUFFERFRAMES],
+									jack_default_audio_sample_t _outL[BUFFERFRAMES],
+									jack_default_audio_sample_t _outR[BUFFERFRAMES])
+	{		
+  /*****************************************************
+
+https://en.wikipedia.org/wiki/Decibel
+  
+Criticism
+
+Various published articles have criticized the unit decibel as having
+shortcomings that hinder its understanding and use:[25][26][27] 
+According to its critics, the decibel creates confusion, obscures
+reasoning, is more related to the era of slide rules than to modern 
+digital processing, are cumbersome and difficult to interpret.[27]
+
+Representing the equivalent of zero watts is not possible, 
+causing problems in conversions. Hickling concludes "Decibels are a
+useless affectation, which is impeding the development of noise 
+control as an engineering discipline".[27]
+
+A common source of confusion in using the decibel occurs when 
+deciding about the use of 10*log or 20*log. In the original 
+definition, it was a power measurement, and as employed in that 
+context, the formulation 10*log should be used, as deci means one 
+tenth. The user must be clear whether the quantity expressed is 
+power or amplitude. It is useful to consider how power or energy is
+expressed, e.g., current*current*resistance, 0.5*velocity*velocity*mass.
+if the formulation is a square function of the variable, 
+then 20*log is the correct expression. In simple ratios without 
+obvious power or energy context, such as damage ratios in nuclear 
+hardness assessments, the 20*log is commonly used.[citation needed]
+
+Quantities in decibels are not necessarily additive,[28][29] thus
+being "of unacceptable form for use in dimensional analysis".[30]
+
+For the same reason that humans excel at additive operation over 
+multiplication, decibels are awkward in inherently additive 
+operations:[31] 
+
+"if two machines each individually produce a 
+[sound pressure] level of, say, 90 dB at a certain point, then when 
+both are operating together we should expect the combined sound 
+pressure level to increase to 93 dB, but certainly not to 180 dB!."
+
+"suppose that the noise from a machine is measured (including the 
+contribution of background noise) and found to be 87 dBA but when 
+the machine is switched off the background noise alone is measured 
+as 83 dBA. ... the machine noise [level (alone)] may be obtained by 
+'subtracting' the 83 dBA background noise from the combined level of 
+87 dBA; i.e., 84.8 dBA." 
+
+"in order to find a representative value of the sound level in a 
+room a number of measurements are taken at different positions 
+within the room, and an average value is calculated. (...) Compare 
+the logarithmic and arithmetic averages of ... 70 dB and 90 dB: 
+logarithmic average = 87 dB; arithmetic average = 80 dB."
+	
+  *******************************************************/
+
+
+  double a,p;
+  uint magPeak;
+  double dBpeak=0.0;
+	double norm;
+	double fftdB =0;
+	uint i,x,j,nIndex,lastIndex;   
+	dBpeak = 0.0;
+	
+	if (displayType == 1)	
+		{
+		SCOPE.acquire(_inL);
+	 	ANALYSERLEDSIGN.refresh();  		
+	  ANALYSERLEDSIGN.clear(0);
+
+		return;
+		} 
+	 
+	// populate fftw input array with 'windowed' data
+ 	for (i = 0; i < BUFFERFRAMES; i++)
+ 		{
+ 		// apply window 	
+  	in[i] =  (_inL[i] * gain) * window[i]; 
+ 		
+ 		//However, when the signal and noise are measured
+ 		//in Volts or Amperes, which are measures of amplitudes,
+ 		// they must be squared to be proportionate to power as
+ 		// shown below: 
+ 	
+ 		// Bryan Suits suits@mtu.edu says this...	
+ 		// OK, I think I understand this simpler description.
+		// dB would be 10 log(power) = 10 log(amplitude squared) = 20 log(abs value of amplitude)
+	
+  	if (_inL[i] > dBpeak) // find the peak (fundamental dB)
+ 		 		dBpeak=_inL[i];
+  //	printf("%d = %2.3f\n",i,window[i]);
+		}
+	
+	//	printf("dB is %2.15f\r",dB);
+		dB = 20 * log10(dBpeak) + 96.4 + 35.6; // which means....there is 96.4dB of
+																		 			 // dynamic range in a 16 bit signal
+																		 			 // and...39.6 db OF NOISE!!!
+																		 			 // (on this computer....)
+																		 			 // ..maybe
+ 
+	// execute fftw plan 
+	fftw_execute(thePlan);
+	
+	
+	
+	nIndex = 2; // skip over dc and 21Hz
+ 	lastIndex =3;
+ 	//norm = -10.0 * log10 (sqr ((double) (BUFFERFRAMES))) + 6.0;      
+ 	
+  for (x = 0; x < SIGN_WIDTH; x++)
+   	{ 
+   	
+  	
+//  	nIndex = clamp(nIndex,0,2046);
+  
+  //	printf("nIndex is %d     \r",nIndex);
+  
+		 p =0.0;
+		
+		// there are 1024 elements in the FFT array
+		// but only 128 elements in the spectrum array
+		// and we dont want to lose any peak info from 
+		// the FFT array.....so scan the WHOLE FFT array
+		// looking at all the bins, averaging values
+		
+		// the out array is in amplitude (magnitude)
+		// and its normilised to -1.0 & 1.0
+		// to calculate the POWER you need to SQUARE THE AMPLITUDE
+		// then use 10 * log(POWER)
+		// (if you already had the power you could just multiply by 20)
+		// but it still doesnt work here....maybe because iam using the
+		// mean power...not the peak power
+
+
+		for (j = nIndex;j < lastIndex; j++)
+//		for (j = nIndex;j < nIndex+1; j++)
+			if (j != 0 && j !=  BUFFERFRAMES / 2+ 1  )
+				{
+/*
+https://en.wikipedia.org/wiki/Decibel
+
+"in order to find a representative value of the sound level in a 
+room a number of measurements are taken at different positions 
+within the room, and an average value is calculated. (...) Compare 
+the logarithmic and arithmetic averages of ... 70 dB and 90 dB: 
+logarithmic average = 87 dB; arithmetic average = 80 dB." 
+*/					
+	
+//		dBpeak = 10*log10(sqr(out[j][0]) + sqr(out[j][1]));
+					p +=  sqr(out[j][0]) + sqr(out[j][1]);
+					
+					if (sqr(out[j][0]) + sqr(out[j][1]) > fftdB)
+						fftdB = sqr(out[j][0]) + sqr(out[j][1]);
+						
+				}	else 	{
+//				dBpeak = 10*log10(sqr(out[j][0]));
+			  		  	p += sqr(out[j][0]);  	
+			  		  	
+			  		  	if (sqr(out[j][0]) > fftdB)
+			  		  		fftdB = sqr(out[j][0]);
+			  		  	}
+	
+	
+			p /=  lastIndex - nIndex;
+	
+	//http://www.baudline.com/faq.html
+	
+	//How can a 16 bit linear waveform, which has 6 * 16 = 96 dB
+	//of dynamic range, have spectral energy with a signal to noise
+	//ratio (SNR) of 136 dB or more? 
+	
+//	if (dBpeak > dB)
+//		dB = dBpeak;
+	
+		//dB = 10.0 * log10(p) + 136.0; //+ norm;	// gauge ( 990.5273 Hz, 0 dB )
+	
+	/* 
+	The answer is that dynamic range and SNR are not the same thing.  
+	Let us look at it like this; if you take digital silence (all zeroes) 
+	and you toggle the least significant bit (LSB) then this will be the 
+	quietest signal that is possible with that bit resolution.  
+	
+	This will register in with spectral energy of about -96 dB, 
+	anything less will just be digital silence.  So for spectral 
+	energy to be below -96 dB, the waveform LSB toggling has to be 
+	less than one bit and that's impossible. 
+
+	Detecting a signal beneath the noise floor is common in DSP, 
+	but how can a signal exist that is below a noise floor of zero?  
+	It doesn't get any quieter than digital silence.  
+	So what is going on? 
+	
+	The Fourier transform done by the FFT takes a large block of time
+	domain data and transforms it into the frequency domain.
+	Looking at such a large block of data at a time gives the FFT
+	the advantage of being able to see long term trends in the sub bit
+	noise and infer a signal from that.  Pretty spooky?  
+	
+	Well this is one of the many wonders of DSP.
+ */
+	 	
+	// apply weighting curve
+ 	  if (ANALYSERLEDSIGN.weightingView == 0) 
+ 	  	{
+ 	  	// a weighting 
+  		if (ANALYSERLEDSIGN.weighting == 1)
+  			if (spectrum[x] > 1)
+  				p*=pow(10.0, PEAKS.aWeighting[x] / 10.0);
+		
+			// c weighting	
+ 	  	if (ANALYSERLEDSIGN.weighting == 2)
+ 	  		if (spectrum[i] > 1)
+ 	  			p*=pow(10.0, PEAKS.cWeighting[i] / 10.00);
+			
+			// itu-468 weighting
+ 	    if (ANALYSERLEDSIGN.weighting == 3)
+ 	    	if (spectrum[x] > 1)
+  	   		p*= pow(10.0, PEAKS.itu[x] / 10.00);
+			}
+		   
+
+// Convert from a logarithmic scale to a linear scale by 
+// raising the base of the logarithm to the power of each 
+// data point collected. The new values calculated are now 
+// the same data, but in the linear scale.		
+		
+		if (p > 0.000000001)
+			spectrum[x] =  db2sy(10.0 * log10 (p)); 
+				else
+					spectrum[x] = 0;
+
+
+ //		assert(spectrum[i] > -1.0);
+ 	 
+ 	 
+ 	 
+ 		// scale spectrum array
+ 	 	spectrum[x] *=  PEAKS.postScale;   	
+	
+	// 	 printf("y=%2.2f    p=%2.2f    index=%d       p=%2.10f             \r",spectrum[i],(-10.0 * log10(p)),nIndex - lastIndex);
+//	assert(spectrum[i]  0);	
+
+		// check for new peaks
+		PEAKS.check(x,spectrum[x]);	
+	 	
+	 	nIndex = lastIndex;	
+	 	
+	 	lastIndex += ANALYSERLEDSIGN.calcIndex(x,xScale); 
+		}  //  for ( i = 0; i < SIGN_WIDTH; i++ )
+
+//exit(0);
+
+	// draw dBMeteretereter
+	dB = 10.0 * log10(fftdB) + 77.81; // fft 
+ 	
+   signOut();
+	}
+	
+//////////////////////////////////////////////
+//
+//	analyser::db2sy (double db)		
+//
+//////////////////////////////////////////////
+uint effect::db2sy (double db)  
+	{
+
+	int upper_db = 0;
+	int lower_db = -132;
+	int noiseFloor = 18;
+	 
+	// normalize dB to 48
+  int sy = ((db - upper_db) /
+	     		  (lower_db - upper_db)) *
+		        (double)(PEAKY);
+
+  return clamp(PEAKY - noiseFloor - sy,0,PEAKY);
+	}
+		
+////////////////////////////////////
+//
+//analyser::signOut();
+//
+//////////////////////////////////// 
+void effect::signOut()
+	{
+	int x,y;
+ 	float p=1.0/128.0;
+	refresh++;
+ 	
+ 	if (refresh > REFRESH)
+ 		{
+ 		refresh =0;	
+		ANALYSERLEDSIGN.clear(0);
+	 
+	 	// then draw new analyser frame 		
+	 	PEAKS.drawPeaks();
+		PEAKS.BIGPEAKS.drawBigPeaks(xScale); // 4 peaks @ top
+		PEAKS.DBMETER.updateMeter(dB,ANALYSERLEDSIGN.weighting);	
+
+		// 3d spectrogram
+		MESA.MESH.addRow((uint*)PEAKS.peak,(uint*)PEAKS.peakThreshold);
+		MESA.TUNNEL.MESH.addRow((uint*)PEAKS.peak,(uint*)PEAKS.peakThreshold);
+		MESA.SPECTROGRAM.addRow((uint*)PEAKS.peak, (uint*)PEAKS.peakThreshold);
+		MESA.HISTOGRAM.add((uint*)PEAKS.peak,(uint*)PEAKS.peakThreshold);
+
+	//	if (MESA.busy == 0)
+			MESA.display(PEAKS.DBMETER.dB);
+
+	 	// clear the sign
+	 	ANALYSERLEDSIGN.refresh();  		
+ 		}
+  	}
+

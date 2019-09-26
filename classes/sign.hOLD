@@ -1,0 +1,17 @@
+#define SIGNWIDTHBYTES 32
+#define SIGNHEIGHTBYTES 48
+#define BUFFERSIZE SIGNWIDTHBYTES*SIGNHEIGHTBYTES
+
+#define PORTNUM 5001
+
+// Message
+struct message
+{
+  // login password if first frame, frame data for all successive packets
+  char data[SIGNHEIGHTBYTES][SIGNWIDTHBYTES];   
+};
+
+// Perform sign operations.  Return 1 if we're to continue, 0 to quit
+int do_sign();
+
+

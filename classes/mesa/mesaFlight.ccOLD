@@ -1,0 +1,187 @@
+#define MAXFLIGHTSTEPS 360
+ 
+ class mesaFlight
+ 	{
+ 	public:
+ 		mesaFlight();
+ 		~mesaFlight();
+		
+		void showFlightPath();
+		void calcFlightPath();
+
+		void incIndex();
+		void setupCamera(int _followCurve);
+		
+		float getX(int _offset);
+		float getY(int _offset);
+		float getZ(int _offset);
+			
+		int flight;
+		int flightSteps;
+		int flying;
+		int inited;
+   		int SPEED;
+		float flightTiltY;		
+	   	float flightCentreX,flightCentreY,flightCentreZ;
+	   	float flightDiameterX,flightDiameterY,flightDiameterZ;
+	   	float flightX[MAXFLIGHTSTEPS],flightY[MAXFLIGHTSTEPS],flightZ[MAXFLIGHTSTEPS];
+   	
+ 	private:
+ 		int index;
+ 		int speed;	
+ 	};
+ 
+///////////////////////////////////////
+//
+//	mesa flight constructor
+//
+///////////////////////////////////////	
+mesaFlight::mesaFlight()
+	{
+	inited = 0;	
+	index = 0;
+	flying = 0;
+	speed = 0;
+	
+	flightCentreX = flightCentreY = flightCentreZ = 0;
+	flightDiameterX = flightDiameterY = flightDiameterZ = SIGN_WIDTH;
+	
+	calcFlightPath();
+	  
+	inited = 1;	
+	}
+
+///////////////////////////////////////
+//
+//	mesa flight deconstructor
+//
+///////////////////////////////////////	
+mesaFlight::~mesaFlight()
+	{
+		
+	}
+
+/////////////////////////////////////
+//
+// 	void mesaFlight::calcFlightPath()
+//
+/////////////////////////////////////
+void mesaFlight::calcFlightPath()
+	{
+	int j;
+	
+	float theta;
+	
+	flightSteps = 360;
+
+	// flight 0
+	for (j=0;j < flightSteps;j++)
+		{
+		theta = 2.0 * M_PI * (j / (float)flightSteps);
+		
+		flightX[j] = flightCentreX + ((flightDiameterX / 2.0) * cos(theta));
+		flightY[j] = (flightCentreY + ((flightDiameterY / 2.0) * sin(theta)));
+		flightZ[j] = flightCentreZ + ((flightDiameterZ / 2.0) * sin(theta));
+		}
+ 	}
+ 
+/////////////////////////////////
+//
+//		void incIndex();
+//
+////////////////////////////////
+void mesaFlight::incIndex()
+	{
+	if (SPEED > 0)
+		speed++;
+			else
+				speed--;
+
+	if (speed > SPEED)
+		{
+		speed = 0;
+		index++;
+		}
+
+	if (speed < -SPEED)
+		{
+		speed = 0;
+		index--;
+		}
+
+	if  (index > 359)
+		index = 0;
+
+	if (index < 0)
+		index = 360;
+
+	}
+
+//////////////////////////////
+//
+// 	getX()
+//
+///////////////////////////////
+float mesaFlight::getX(int _offset)
+	{
+	if (index + _offset > 360 - 1)
+		return flightX[index];	
+			else
+				return flightX[index + _offset];	
+	}
+
+//////////////////////////////
+//
+// 	getY()
+//
+///////////////////////////////
+float mesaFlight::getY(int _offset)
+	{
+	if (index + _offset > 360 - 1)		
+		return flightY[index];	
+			else
+				return flightY[index + _offset];	
+	}
+
+//////////////////////////////
+//
+// 	getX()
+//
+///////////////////////////////
+float mesaFlight::getZ(int _offset)
+	{
+	if (index + _offset > 360 - 1)
+		return flightZ[index];	
+			else
+				return flightZ[index + _offset];	
+	}
+
+////////////////////////////////
+//
+//	void mesaFlight::showFlightPath()
+//
+////////////////////////////////
+void mesaFlight::showFlightPath()
+	{
+	int i;
+	glPushMatrix();
+
+	// draw flight path
+	glBegin(GL_POINTS);
+		
+		glColor3f(1.0,  0.0, 0.0 );	
+		
+		for (i = 0;i < flightSteps ;i+=4)
+			{
+			// camera position
+			glVertex3f(flightX[i], flightY[i], flightZ[i]);
+			}		
+
+	// flight eye centre
+	glVertex3f(flightCentreX, flightCentreY, flightCentreZ);
+
+	glEnd();
+			
+	glPopMatrix();
+	}
+ 
